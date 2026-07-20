@@ -3,10 +3,10 @@
 /* Three.js objects are intentionally mutated inside the render loop. */
 /* eslint-disable react-hooks/immutability */
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState, type MutableRefObject, type PointerEvent as ReactPointerEvent } from "react";
 import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { ContactShadows, Environment, Html, RoundedBox, useGLTF, useProgress, useTexture } from "@react-three/drei";
-import { Info, Keyboard, MapPin, MousePointer2, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Info, Keyboard, MapPin, MousePointer2, X } from "lucide-react";
 import * as THREE from "three";
 import { artifacts, type Artifact } from "@/data/exhibit";
 
@@ -16,6 +16,7 @@ const positions: [number, number, number][] = [
 
 const movementKeys = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
 const MIN_ARTIFACT_DISTANCE = 1.65;
+type PressedKeysRef = MutableRefObject<Set<string>>;
 
 const modelConfig: Partial<Record<Artifact["shape"], { path: string; height: number; rotation?: [number, number, number] }>> = {
   vase: { path: "/models/amphora.glb", height: 1.75, rotation: [0, 0, Math.PI / 2] },
@@ -67,9 +68,8 @@ function createMarbleTexture() {
   return texture;
 }
 
-function FirstPersonControls() {
+function FirstPersonControls({ pressed }: { pressed: PressedKeysRef }) {
   const { camera, gl } = useThree();
-  const pressed = useRef(new Set<string>());
   const dragging = useRef(false);
   const lastPointer = useRef({ x: 0, y: 0 });
   const yaw = useRef(0);
@@ -84,6 +84,7 @@ function FirstPersonControls() {
       }
     };
     const up = (event: KeyboardEvent) => pressed.current.delete(event.code);
+    const clearMovement = () => pressed.current.clear();
     const canvas = gl.domElement;
     const pointerDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
@@ -109,6 +110,7 @@ function FirstPersonControls() {
 
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
+    window.addEventListener("blur", clearMovement);
     canvas.addEventListener("pointerdown", pointerDown);
     canvas.addEventListener("pointermove", pointerMove);
     canvas.addEventListener("pointerup", pointerUp);
@@ -117,14 +119,16 @@ function FirstPersonControls() {
     return () => {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", clearMovement);
       canvas.removeEventListener("pointerdown", pointerDown);
       canvas.removeEventListener("pointermove", pointerMove);
       canvas.removeEventListener("pointerup", pointerUp);
       canvas.removeEventListener("pointercancel", pointerUp);
       canvas.removeEventListener("contextmenu", preventMenu);
       canvas.classList.remove("is-looking");
+      clearMovement();
     };
-  }, [gl]);
+  }, [gl, pressed]);
 
   useFrame((_, delta) => {
     camera.rotation.order = "YXZ";
@@ -154,6 +158,67 @@ function FirstPersonControls() {
   });
 
   return null;
+}
+
+function MobileMovementControls({ pressed }: { pressed: PressedKeysRef }) {
+  const activePointers = useRef(new Map<number, string>());
+  const [activeCodes, setActiveCodes] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => () => {
+    activePointers.current.forEach((code) => pressed.current.delete(code));
+    activePointers.current.clear();
+  }, [pressed]);
+
+  const startMoving = (code: string) => (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    activePointers.current.set(event.pointerId, code);
+    pressed.current.add(code);
+    setActiveCodes(new Set(activePointers.current.values()));
+  };
+
+  const stopMoving = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const code = activePointers.current.get(event.pointerId);
+    if (!code) return;
+    activePointers.current.delete(event.pointerId);
+    if (![...activePointers.current.values()].includes(code)) pressed.current.delete(code);
+    setActiveCodes(new Set(activePointers.current.values()));
+  };
+
+  const controls = [
+    { code: "ArrowUp", label: "Kreni naprijed", className: "is-forward", icon: ChevronUp },
+    { code: "ArrowLeft", label: "Kreni lijevo", className: "is-left", icon: ChevronLeft },
+    { code: "ArrowRight", label: "Kreni desno", className: "is-right", icon: ChevronRight },
+    { code: "ArrowDown", label: "Kreni natrag", className: "is-back", icon: ChevronDown },
+  ];
+
+  return (
+    <div className="gallery-mobile-controls" role="group" aria-label="Kontrole kretanja">
+      <span className="gallery-mobile-controls-label">Kretanje</span>
+      <div className="gallery-dpad">
+        {controls.map(({ code, label, className, icon: Icon }) => (
+          <button
+            key={code}
+            type="button"
+            className={`gallery-dpad-button ${className}`}
+            aria-label={label}
+            aria-pressed={activeCodes.has(code)}
+            onPointerDown={startMoving(code)}
+            onPointerUp={stopMoving}
+            onPointerCancel={stopMoving}
+            onLostPointerCapture={stopMoving}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <Icon size={24} strokeWidth={1.7} aria-hidden="true" />
+          </button>
+        ))}
+        <span className="gallery-dpad-center" aria-hidden="true"><i /></span>
+      </div>
+    </div>
+  );
 }
 
 function WallArtwork({
@@ -370,6 +435,7 @@ function ArtifactObject({ artifact, position, onSelect }: { artifact: Artifact; 
 
 export function VirtualGallery() {
   const [selected, setSelected] = useState<Artifact | null>(null);
+  const pressed = useRef(new Set<string>());
 
   return (
     <div className="gallery-shell">
@@ -388,7 +454,7 @@ export function VirtualGallery() {
           <ContactShadows position={[0, 0.02, -1]} scale={32} opacity={0.32} blur={2.3} far={7} />
           <Environment preset="warehouse" environmentIntensity={0.25} />
         </Suspense>
-        <FirstPersonControls />
+        <FirstPersonControls pressed={pressed} />
       </Canvas>
 
       <ModelLoadingStatus />
@@ -398,6 +464,7 @@ export function VirtualGallery() {
         <span><MousePointer2 size={16} /> Drži i povuci za pogled</span>
         <span><Keyboard size={18} /> Strelice za kretanje</span>
       </div>
+      {!selected && <MobileMovementControls pressed={pressed} />}
 
       {selected ? (
         <aside className="gallery-panel">
